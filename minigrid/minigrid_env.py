@@ -13,7 +13,7 @@ from gymnasium import spaces
 from gymnasium.core import ActType, ObsType
 
 from minigrid.core.actions import Actions
-from minigrid.core.constants import COLOR_NAMES, DIR_TO_VEC, TILE_PIXELS
+from minigrid.core.constants import COLOR_NAMES, DIR_TO_VEC, TILE_PIXELS, COLOR_TO_IDX, OBJECT_TO_IDX
 from minigrid.core.grid import Grid
 from minigrid.core.mission import MissionSpace
 from minigrid.core.world_object import Point, WorldObj
@@ -80,6 +80,7 @@ class MiniGridEnv(gym.Env):
                 "image": image_observation_space,
                 "direction": spaces.Discrete(4),
                 "mission": mission_space,
+                "description": spaces.Text(4096)
             }
         )
 
@@ -621,6 +622,181 @@ class MiniGridEnv(gym.Env):
             grid.set(*agent_pos, None)
 
         return grid, vis_mask
+    
+    ### EXTERNAL CODE BEGINS ###
+    def gen_description(self, view_mask=False, language="english"):
+        grid, vis_mask = self.gen_obs_grid()
+
+        # Encode the partially observable view into a numpy array
+        if view_mask:
+            image = grid.encode(vis_mask)
+        else:
+            image = grid.encode()
+        # (OBJECT_TO_IDX[self.type], COLOR_TO_IDX[self.color], state)
+        # State, 0: open, 1: closed, 2: locked
+        if language == 'english':
+            IDX_TO_STATE = {0: 'open', 1: 'closed', 2: 'locked'}
+            IDX_TO_COLOR = dict(zip(COLOR_TO_IDX.values(), COLOR_TO_IDX.keys()))
+            IDX_TO_OBJECT = dict(zip(OBJECT_TO_IDX.values(), OBJECT_TO_IDX.keys()))
+        elif language == 'french':
+            IDX_TO_STATE = {0: 'ouverte', 1: 'fermée', 2: 'fermée à clef'}
+            IDX_TO_COLOR = {0: 'rouge', 1: 'verte', 2: 'bleue', 3: 'violette', 4: 'jaune', 5: 'grise'}
+            IDX_TO_OBJECT = {0: 'non visible', 1: 'vide', 2: 'mur', 3: 'sol', 4: 'porte', 5: 'clef',
+                                6: 'balle', 7: 'boîte', 8: 'but', 9: 'lave', 10: 'agent'}
+        else:
+            raise RuntimeError("Language not supported")
+
+        list_textual_descriptions = []
+
+        if self.carrying is not None:
+            # print('carrying')
+            if language == 'english':
+                list_textual_descriptions.append("You carry a {} {}".format(self.carrying.color, self.carrying.type))
+            elif language == 'french':
+                list_textual_descriptions.append("Tu portes une {} {}".format(self.carrying.type, self.carrying.color))
+
+        # print('A agent position i: {}, j: {}'.format(self.agent_pos[0], self.agent_pos[1]))
+        agent_pos_vx, agent_pos_vy = self.get_view_coords(self.agent_pos[0], self.agent_pos[1])
+        # print('B agent position i: {}, j: {}'.format(agent_pos_vx, agent_pos_vy))
+
+        view_field_dictionary = dict()
+
+        for i in range(image.shape[0]):
+            for j in range(image.shape[1]):
+                if image[i][j][0] != 0 and image[i][j][0] != 1 and image[i][j][0] != 2:
+                    if i not in view_field_dictionary.keys():
+                        view_field_dictionary[i] = dict()
+                        view_field_dictionary[i][j] = image[i][j]
+                    else:
+                        view_field_dictionary[i][j] = image[i][j]
+
+        # Find the wall if any
+        #  We describe a wall only if there is no objects between the agent and the wall in straight line
+
+        # Find wall in front
+        j = agent_pos_vy - 1
+        object_seen = False
+        while j >= 0 and not object_seen:
+            if image[agent_pos_vx][j][0] != 0 and image[agent_pos_vx][j][0] != 1:
+                if image[agent_pos_vx][j][0] == 2:
+                    if language == 'english':
+                        list_textual_descriptions.append(
+                            f"You see a wall {agent_pos_vy - j} step{'s' if agent_pos_vy - j > 1 else ''} forward")
+                    elif language == 'french':
+                        list_textual_descriptions.append("Tu vois un mur à {} pas devant".format(agent_pos_vy - j))
+                    object_seen = True
+                else:
+                    object_seen = True
+            j -= 1
+        # Find wall left
+        i = agent_pos_vx - 1
+        object_seen = False
+        while i >= 0 and not object_seen:
+            if image[i][agent_pos_vy][0] != 0 and image[i][agent_pos_vy][0] != 1:
+                if image[i][agent_pos_vy][0] == 2:
+                    if language == 'english':
+                        list_textual_descriptions.append(
+                            f"You see a wall {agent_pos_vx - i} step{'s' if agent_pos_vx - i > 1 else ''} left")
+                    elif language == 'french':
+                        list_textual_descriptions.append("Tu vois un mur à {} pas à gauche".format(agent_pos_vx - i))
+                    object_seen = True
+                else:
+                    object_seen = True
+            i -= 1
+        # Find wall right
+        i = agent_pos_vx + 1
+        object_seen = False
+        while i < image.shape[0] and not object_seen:
+            if image[i][agent_pos_vy][0] != 0 and image[i][agent_pos_vy][0] != 1:
+                if image[i][agent_pos_vy][0] == 2:
+                    if language == 'english':
+                        list_textual_descriptions.append(
+                            f"You see a wall {i - agent_pos_vx} step{'s' if i - agent_pos_vx > 1 else ''} right")
+                    elif language == 'french':
+                            list_textual_descriptions.append("Tu vois un mur à {} pas à droite".format(i - agent_pos_vx))
+                    object_seen = True
+                else:
+                    object_seen = True
+            i += 1
+
+        # returns the position of seen objects relative to you
+        for i in view_field_dictionary.keys():
+            for j in view_field_dictionary[i].keys():
+                if i != agent_pos_vx or j != agent_pos_vy:
+                    object = view_field_dictionary[i][j]
+                    relative_position = dict()
+
+                    if i - agent_pos_vx > 0:
+                        if language == 'english':
+                            relative_position["x_axis"] = ("right", i - agent_pos_vx)
+                        elif language == 'french':
+                                relative_position["x_axis"] = ("à droite", i - agent_pos_vx)
+                    elif i - agent_pos_vx == 0:
+                        if language == 'english':
+                            relative_position["x_axis"] = ("face", 0)
+                        elif language == 'french':
+                            relative_position["x_axis"] = ("en face", 0)
+                    else:
+                        if language == 'english':
+                            relative_position["x_axis"] = ("left", agent_pos_vx - i)
+                        elif language == 'french':
+                            relative_position["x_axis"] = ("à gauche", agent_pos_vx - i)
+                    if agent_pos_vy - j > 0:
+                        if language == 'english':
+                            relative_position["y_axis"] = ("forward", agent_pos_vy - j)
+                        elif language == 'french':
+                            relative_position["y_axis"] = ("devant", agent_pos_vy - j)
+                    elif agent_pos_vy - j == 0:
+                        if language == 'english':
+                            relative_position["y_axis"] = ("forward", 0)
+                        elif language == 'french':
+                            relative_position["y_axis"] = ("devant", 0)
+
+                    distances = []
+                    if relative_position["x_axis"][0] in ["face", "en face"]:
+                        distances.append((relative_position["y_axis"][1], relative_position["y_axis"][0]))
+                    elif relative_position["y_axis"][1] == 0:
+                        distances.append((relative_position["x_axis"][1], relative_position["x_axis"][0]))
+                    else:
+                        distances.append((relative_position["x_axis"][1], relative_position["x_axis"][0]))
+                        distances.append((relative_position["y_axis"][1], relative_position["y_axis"][0]))
+
+                    description = ""
+                    if object[0] != 4:  # if it is not a door
+                        if language == 'english':
+                            description = f"You see a {IDX_TO_COLOR[object[1]]} {IDX_TO_OBJECT[object[0]]} "
+                        elif language == 'french':
+                            description = f"Tu vois une {IDX_TO_OBJECT[object[0]]} {IDX_TO_COLOR[object[1]]} "
+
+                    else:
+                        if IDX_TO_STATE[object[2]] != 0:  # if it is not open
+                            if language == 'english':
+                                description = f"You see a {IDX_TO_STATE[object[2]]} {IDX_TO_COLOR[object[1]]} {IDX_TO_OBJECT[object[0]]} "
+                            elif language == 'french':
+                                description = f"Tu vois une {IDX_TO_OBJECT[object[0]]} {IDX_TO_COLOR[object[1]]} {IDX_TO_STATE[object[2]]} "
+
+                        else:
+                            if language == 'english':
+                                description = f"You see an {IDX_TO_STATE[object[2]]} {IDX_TO_COLOR[object[1]]} {IDX_TO_OBJECT[object[0]]} "
+                            elif language == 'french':
+                                description = f"Tu vois une {IDX_TO_OBJECT[object[0]]} {IDX_TO_COLOR[object[1]]} {IDX_TO_STATE[object[2]]} "
+
+                    for _i, _distance in enumerate(distances):
+                        if _i > 0:
+                            if language == 'english':
+                                description += " and "
+                            elif language == 'french':
+                                description += " et "
+
+                        if language == 'english':
+                            description += f"{_distance[0]} step{'s' if _distance[0] > 1 else ''} {_distance[1]}"
+                        elif language == 'french':
+                            description += f"{_distance[0]} pas {_distance[1]}"
+
+                    list_textual_descriptions.append(description)
+
+        return ". ".join(list_textual_descriptions)
+    ###  EXTERNAL CODE ENDS  ###
 
     def gen_obs(self):
         """
@@ -638,6 +814,9 @@ class MiniGridEnv(gym.Env):
         # - a textual mission string (instructions for the agent)
         obs = {"image": image, "direction": self.agent_dir, "mission": self.mission}
 
+        ### EXTERNAL CODE BEGINS ###
+        obs["description"] = self.gen_description()
+        ###  EXTERNAL CODE ENDS  ###
         return obs
 
     def get_pov_render(self, tile_size):
