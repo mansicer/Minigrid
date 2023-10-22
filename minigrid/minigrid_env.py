@@ -799,7 +799,8 @@ class MiniGridEnv(gym.Env):
 
                     list_textual_descriptions.append(description)
 
-        return ". ".join(list_textual_descriptions)
+        desc = ". ".join(list_textual_descriptions)
+        return desc if len(desc) > 0 else "You see nothing in front."
     ###  EXTERNAL CODE ENDS  ###
 
     def gen_obs(self):
